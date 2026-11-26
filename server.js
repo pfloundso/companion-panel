@@ -22,27 +22,77 @@ let online = null; // null = verbinde, true = Surface registriert, false = nicht
 // Overlay-Layout: Widgets (Button/Fader) auf einem Raster, jedes an eine Satellite-Taste gebunden
 const LAYOUT_FILE = path.join(__dirname, 'layout.json');
 const int = (v, min, max, d) => (Number.isInteger(v) ? Math.min(max, Math.max(min, v)) : d);
-function cleanLayout(l) {
+const hexColor = (v) => (typeof v === 'string' && /^#[0-9a-f]{6}$/i.test(v) ? v : '');
+function cleanGrid(l) {
   const cols = int(l.cols, 1, 12, 4), rows = int(l.rows, 1, 12, 4);
   const widgets = (Array.isArray(l.widgets) ? l.widgets : []).slice(0, 64).map((w) => {
     const x = int(w.x, 0, cols - 1, 0), y = int(w.y, 0, rows - 1, 0);
-    return { type: w.type === 'fader' ? 'fader' : 'button', key: int(w.key, 0, TOTAL - 1, 0), x, y, w: int(w.w, 1, cols - x, 1), h: int(w.h, 1, rows - y, 1) };
+    const type = w.type === 'fader' || w.type === 'popup' ? w.type : 'button';
+    const o = { type, key: type === 'popup' ? int(w.key, -1, TOTAL - 1, -1) : int(w.key, 0, TOTAL - 1, 0), x, y, w: int(w.w, 1, cols - x, 1), h: int(w.h, 1, rows - y, 1) };
+    if (type === 'popup') { o.popup = /^p\d{1,3}$/.test(w.popup) ? w.popup : ''; o.label = String(w.label || '').slice(0, 24); o.color = hexColor(w.color); }
+    return o;
   });
   return { cols, rows, widgets };
+}
+// Hauptlayout plus Popups (p1, p2, ...): jedes Popup ist ein eigenes kleines Raster mit Titel
+function cleanLayout(l) {
+  const out = cleanGrid(l);
+  out.popups = {};
+  const src = l.popups && typeof l.popups === 'object' ? l.popups : {};
+  Object.keys(src).filter((id) => /^p\d{1,3}$/.test(id)).slice(0, 16).forEach((id) => {
+    const p = src[id] || {};
+    out.popups[id] = { ...cleanGrid(p), title: String(p.title || id).slice(0, 24), close: p.close === true };
+  });
+  return out;
 }
 function defaultLayout() {
   const widgets = [];
   for (let i = 0; i < NB; i++) widgets.push({ type: 'button', key: i, x: i % cfg.columns, y: Math.floor(i / cfg.columns), w: 1, h: 1 });
   const fy = Math.ceil(NB / cfg.columns);
   for (let i = 0; i < NF; i++) widgets.push({ type: 'fader', key: NB + i, x: i % cfg.columns, y: fy, w: 1, h: 3 });
-  return { cols: cfg.columns, rows: fy + 3, widgets };
+  return { cols: cfg.columns, rows: fy + 3, widgets, popups: {} };
 }
 let layout;
 try { layout = cleanLayout(JSON.parse(fs.readFileSync(LAYOUT_FILE, 'utf8'))); } catch (e) { layout = defaultLayout(); }
 
-// Bitmaps nur für Tasten senden, die als Button angezeigt werden (Fader lesen nur den Text)
-const needsBitmap = (k) => layout.widgets.some((w) => w.type === 'button' && w.key === k);
-const pub = (k) => (needsBitmap(k) ? keys[k] : { ...keys[k], bitmap: null });
+// Bitmaps nur für Tasten senden, die im Layout vorkommen. Buttons bekommen das volle Bild, Tasten, die nur
+// ein Fader nutzt, ein verkleinertes (kleines Icon über dem Fader; spart Bandbreite, weil sich der Text
+// und damit das Bild beim Fahren ständig ändert).
+const SMALL = 64;
+function downscale(b64, target) { // Rohdaten RGB, quadratisch, ganzzahlige Box-Mittelung
+  const src = Buffer.from(b64, 'base64');
+  const s = Math.round(Math.sqrt(src.length / 3));
+  const f = Math.floor(s / target);
+  if (s * s * 3 !== src.length || f < 2) return b64;
+  const n = Math.floor(s / f), out = Buffer.alloc(n * n * 3), area = f * f;
+  for (let y = 0; y < n; y++) {
+    for (let x = 0; x < n; x++) {
+      let r = 0, g = 0, b = 0;
+      for (let dy = 0; dy < f; dy++) {
+        let i = ((y * f + dy) * s + x * f) * 3;
+        for (let dx = 0; dx < f; dx++, i += 3) { r += src[i]; g += src[i + 1]; b += src[i + 2]; }
+      }
+      const o = (y * n + x) * 3;
+      out[o] = r / area; out[o + 1] = g / area; out[o + 2] = b / area;
+    }
+  }
+  return out.toString('base64');
+}
+const smallCache = new Map();
+function smallBitmap(k) {
+  const src = keys[k].bitmap, c = smallCache.get(k);
+  if (c && c.src === src) return c.out;
+  const out = downscale(src, SMALL);
+  smallCache.set(k, { src, out });
+  return out;
+}
+const allWidgets = () => [...layout.widgets, ...Object.values(layout.popups || {}).flatMap((p) => p.widgets)]; // auch Popup-Inhalte
+const usedBy = (k, test) => allWidgets().some((w) => w.key === k && (!test || test(w)));
+const pub = (k) => {
+  const { text, color, textColor, bitmap } = keys[k];
+  const bm = bitmap && usedBy(k) ? (usedBy(k, (w) => w.type !== 'fader') ? bitmap : smallBitmap(k)) : null;
+  return { text, color, textColor, bitmap: bm };
+};
 const pubKeys = () => keys.map((_, k) => pub(k));
 
 function applyKey(k, text, color, textColor, bitmap = null) {

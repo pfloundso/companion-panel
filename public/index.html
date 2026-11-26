@@ -46,13 +46,20 @@
   .key.bmp .t { display: none; }
   .key.bmp.down canvas { filter: brightness(1.5); }
   .key.bmp.down { outline: 2px solid var(--accent); outline-offset: -2px; }
+  /* Fader: schmaler Streifen mit Kugel. Maße über --ball / --rail anpassen */
   .track {
-    position: relative; flex: 1; width: 100%; max-width: 140px; min-height: 0;
-    background: var(--key); border: 1px solid var(--line); border-radius: 10px;
-    overflow: hidden; touch-action: none; cursor: ns-resize;
+    --ball: 26px; --rail: 6px;
+    position: relative; flex: 1; width: 100%; max-width: 56px; min-height: 0;
+    touch-action: none; cursor: ns-resize;
   }
-  .fill { position: absolute; left: 0; right: 0; bottom: 0; background: var(--key-hi); }
-  .cap { position: absolute; left: 0; right: 0; height: 4px; background: var(--accent); }
+  .track::before { content: ""; position: absolute; left: 50%; width: var(--rail); top: calc(var(--ball) / 2); bottom: calc(var(--ball) / 2); transform: translateX(-50%); border-radius: var(--rail); background: var(--key-hi); }
+  .fill { position: absolute; left: 50%; width: var(--rail); bottom: calc(var(--ball) / 2); transform: translateX(-50%); border-radius: var(--rail); background: var(--accent); }
+  .cap { position: absolute; left: 50%; width: var(--ball); height: var(--ball); margin-left: calc(var(--ball) / -2); border-radius: 50%; background: var(--text); box-shadow: 0 1px 4px rgba(0, 0, 0, .5); }
+  .w.off .fill { background: var(--key-hi); }
+  .w.off .cap { background: var(--dim); }
+  .ico { --ico: 36px; flex: none; width: var(--ico); height: var(--ico); border-radius: 8px; overflow: hidden; background: var(--key); }
+  .ico[hidden] { display: none; }
+  .ico canvas { display: block; width: 100%; height: 100%; }
   .val { font-variant-numeric: tabular-nums; font-size: 22px; }
   .name { color: var(--dim); font-size: 14px; padding: 8px 12px; border-radius: 8px; cursor: pointer; touch-action: none; min-height: 44px; }
   .name.down { color: var(--accent); }
@@ -77,6 +84,17 @@
   .edit .w { outline: 1px dashed var(--line); outline-offset: 2px; cursor: grab; touch-action: none; }
   .edit .w > * { pointer-events: none; }
   .edit .w.sel { outline: 2px solid var(--accent); }
+  /* Popups */
+  .w.popup { display: block; }
+  .key.pop::after { content: ""; position: absolute; right: 5px; bottom: 5px; border: 5px solid transparent; border-right-color: var(--dim); border-bottom-color: var(--dim); pointer-events: none; }
+  .key.pop:not(.bmp) { font-weight: 600; }
+  #pop { position: fixed; inset: 0; z-index: 8; display: flex; align-items: center; justify-content: center; padding: max(16px, env(safe-area-inset-top)) 16px max(16px, env(safe-area-inset-bottom)); background: rgba(10, 12, 15, .72); backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); }
+  #pop[hidden] { display: none; }
+  #pop .sheet { background: var(--bg); border: 1px solid var(--line); border-radius: 16px; padding: 12px; display: flex; flex-direction: column; gap: 10px; max-width: 100%; max-height: 100%; }
+  #pop .head { display: flex; align-items: center; justify-content: space-between; gap: 12px; color: var(--dim); font-size: 14px; }
+  #pop .ttl { padding-left: 4px; }
+  #pop .head button { width: 40px; height: 40px; border: 1px solid var(--line); border-radius: 10px; background: var(--key); color: var(--text); font-size: 18px; cursor: pointer; }
+  #pop .grid { align-self: center; }
 </style>
 </head>
 <body>
@@ -89,6 +107,7 @@
     <button id="next" aria-label="Nächste Seite">›</button>
   </div>
 </main>
+<div id="pop" hidden><div class="sheet"><div class="head"><span class="ttl" id="poptitle"></span><button id="popx" aria-label="Schließen">✕</button></div><div class="grid" id="popgrid"></div></div></div>
 <button class="fs" id="fs" aria-label="Vollbild" hidden>⛶</button>
 <button class="ed" id="ed" aria-label="Layout bearbeiten">✎</button>
 <script src="/socket.io/socket.io.js"></script>
@@ -97,9 +116,14 @@ const socket = io();
 const $ = (id) => document.getElementById(id);
 const net = { online: null, page: null, lost: false };
 const GAP = 6;
-let layout = { cols: 4, rows: 4, widgets: [] }, keys = [], surfaceCols = 4, CELL = 100;
-let editing = false, draft = null, sel = -1, W = [];
-const cur = () => (editing ? draft : layout);
+let layout = { cols: 4, rows: 4, widgets: [], popups: {} }, keys = [], surfaceCols = 4, CELL = 100;
+let editing = false, draft = null, sel = -1, W = [], PW = [];
+let editId = 'main';  // im Editor: 'main' oder Popup-ID (p1, p2, ...)
+const popStack = [];  // geöffnete Popups, das oberste zuletzt
+const tgt = () => (editId === 'main' ? draft : draft.popups[editId]); // das Raster, das gerade bearbeitet wird
+const cur = () => (editing ? tgt() : layout);
+const popsOf = () => (editing ? draft : layout).popups || {};
+const esc = (t) => String(t).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
 // Fader-Text auf dem Encoder-Button:  Label|min|max|step|wert   z. B.  Vox|-90|10|0.5|$(x32:ch01_level)
 const num = (x) => { const n = parseFloat(String(x).trim().replace(',', '.')); return Number.isNaN(n) ? null : n; };
@@ -114,25 +138,27 @@ function parseFader(text) {
 }
 
 const CLEAR_BLACK = true; // Tasten mit schwarzem Hintergrund durchsichtig darstellen (false = wie in Companion)
+const isClear = (color) => CLEAR_BLACK && /^#0{6}$/i.test(color || '');
+function paint(cv, b64, clear) { // Rohdaten RGB, quadratisch
+  const bin = atob(b64), s = Math.round(Math.sqrt(bin.length / 3));
+  cv.width = cv.height = s;
+  const ctx = cv.getContext('2d'), img = ctx.createImageData(s, s);
+  for (let p = 0; p < s * s; p++) {
+    const r = bin.charCodeAt(p * 3), g = bin.charCodeAt(p * 3 + 1), bl = bin.charCodeAt(p * 3 + 2);
+    img.data[p * 4] = r;
+    img.data[p * 4 + 1] = g;
+    img.data[p * 4 + 2] = bl;
+    img.data[p * 4 + 3] = clear ? Math.min(255, Math.max(r, g, bl) * 5) : 255; // Schwarz -> transparent, weicher Übergang
+  }
+  ctx.putImageData(img, 0, 0);
+}
 function setKey(el, b) {
   const cv = el.firstChild;
-  const clear = CLEAR_BLACK && /^#0{6}$/i.test(b.color || '');
+  const clear = isClear(b.color);
   el.lastChild.textContent = b.text;
   el.style.setProperty('--bgc', clear ? '' : b.color || '');
   el.style.setProperty('--fg', b.textColor || '');
-  if (b.bitmap) { // Rohdaten RGB, quadratisch
-    const bin = atob(b.bitmap), s = Math.round(Math.sqrt(bin.length / 3));
-    cv.width = cv.height = s;
-    const ctx = cv.getContext('2d'), img = ctx.createImageData(s, s);
-    for (let p = 0; p < s * s; p++) {
-      const r = bin.charCodeAt(p * 3), g = bin.charCodeAt(p * 3 + 1), bl = bin.charCodeAt(p * 3 + 2);
-      img.data[p * 4] = r;
-      img.data[p * 4 + 1] = g;
-      img.data[p * 4 + 2] = bl;
-      img.data[p * 4 + 3] = clear ? Math.min(255, Math.max(r, g, bl) * 5) : 255; // Schwarz -> transparent, weicher Übergang
-    }
-    ctx.putImageData(img, 0, 0);
-  }
+  if (b.bitmap) paint(cv, b.bitmap, clear);
   el.classList.toggle('bmp', !!b.bitmap);
 }
 
@@ -144,31 +170,46 @@ function buttonWidget(d, el) {
   el.appendChild(b);
   const send = (action) => socket.emit('press', { k: d.key, action });
   b.addEventListener('pointerdown', (e) => { if (editing) return; b.setPointerCapture(e.pointerId); b.classList.add('down'); send('down'); });
-  const up = () => { if (b.classList.contains('down')) { b.classList.remove('down'); send('up'); } };
+  const up = () => {
+    if (!b.classList.contains('down')) return;
+    b.classList.remove('down'); send('up');
+    const p = popStack.length && popsOf()[popStack[popStack.length - 1]];
+    if (p && p.close) closePopup();
+  };
   b.addEventListener('pointerup', up);
   b.addEventListener('pointercancel', up);
   return { type: 'button', b };
 }
 
+// Popup-Button: öffnet ein Popup (nur im Browser, an Companion geht nichts). Mit Taste zeigt er deren Bild/Text, sonst die Beschriftung.
+function popupWidget(d, el) {
+  const b = document.createElement('button');
+  b.className = 'key pop';
+  b.innerHTML = '<canvas></canvas><span class="t"></span>';
+  el.appendChild(b);
+  b.addEventListener('click', () => { if (!editing) openPopup(d.popup); });
+  return { type: 'popup', b };
+}
+
 function draw(s, v) {
   const p = Math.min(100, Math.max(0, (v - s.f.min) / (s.f.max - s.f.min) * 100));
-  s.fill.style.height = p + '%';
-  s.cap.style.bottom = `calc(${p}% - 2px)`;
-  s.cap.style.top = 'auto';
+  s.fill.style.height = `calc((100% - var(--ball)) * ${p / 100})`;
+  s.cap.style.bottom = `calc((100% - var(--ball)) * ${p / 100})`;
   s.val.textContent = Math.round(v * 100) / 100;
 }
 function show(s) {
-  if (!s.f || s.v === null) { s.fill.style.height = '0%'; s.cap.style.bottom = '-2px'; s.val.textContent = '–'; }
+  if (!s.f || s.v === null) { s.fill.style.height = '0'; s.cap.style.bottom = '0'; s.val.textContent = '–'; }
   else draw(s, s.v);
 }
 
 function faderWidget(d, el) {
-  el.innerHTML = '<div class="track"><div class="fill"></div><div class="cap"></div></div><div class="val">–</div><div class="name"></div>';
+  el.innerHTML = '<div class="ico" hidden><canvas></canvas></div><div class="track"><div class="fill"></div><div class="cap"></div></div><div class="val">–</div><div class="name"></div>';
   const q = (c) => el.querySelector(c);
-  const s = { type: 'fader', track: q('.track'), fill: q('.fill'), cap: q('.cap'), val: q('.val'), name: q('.name'), f: null, v: null, sent: 0, dragging: false, hold: 0 };
+  const s = { type: 'fader', ico: q('.ico'), track: q('.track'), fill: q('.fill'), cap: q('.cap'), val: q('.val'), name: q('.name'), f: null, v: null, sent: 0, dragging: false, hold: 0 };
   const fromEvent = (e) => {
     const r = s.track.getBoundingClientRect();
-    const p = 1 - Math.min(1, Math.max(0, (e.clientY - r.top) / r.height));
+    const pad = (parseFloat(getComputedStyle(s.track).getPropertyValue('--ball')) || 26) / 2; // Kugelmitte läuft zwischen den Enden
+    const p = 1 - Math.min(1, Math.max(0, (e.clientY - r.top - pad) / (r.height - 2 * pad)));
     let v = s.f.min + p * (s.f.max - s.f.min);
     v = s.f.min + Math.round((v - s.f.min) / s.f.step) * s.f.step;
     return Math.min(s.f.max, Math.max(s.f.min, +v.toFixed(4)));
@@ -201,6 +242,13 @@ function faderWidget(d, el) {
 }
 
 function refresh(w) {
+  if (w.type === 'popup') {
+    const p = popsOf()[w.d.popup], k = w.d.key >= 0 ? keys[w.d.key] : null;
+    const label = w.d.label || (p && p.title) || 'Popup';
+    setKey(w.b, k && (k.bitmap || k.text) ? k : { text: label, color: w.d.color || '', textColor: '', bitmap: null });
+    w.el.classList.toggle('off', !p);
+    return;
+  }
   const k = keys[w.d.key] || { text: '' };
   const hint = editing ? `Taste ${w.d.key}` : '';
   if (w.type === 'button') { setKey(w.b, { ...k, text: k.text || hint }); return; }
@@ -209,46 +257,86 @@ function refresh(w) {
   w.v = p ? p.value : null;
   w.name.textContent = p ? (p.label || hint) : hint;
   w.el.classList.toggle('off', !p);
+  w.ico.hidden = !k.bitmap; // kleines Icon der Companion-Taste über dem Fader
+  if (k.bitmap) paint(w.ico.firstChild, k.bitmap, isClear(k.color));
   if (!w.dragging && performance.now() > w.hold) show(w);
 }
 
 const place = (el, d) => { el.style.gridColumn = `${d.x + 1} / span ${d.w}`; el.style.gridRow = `${d.y + 1} / span ${d.h}`; };
 
 // Zellgröße: quadratisch, passend zu Breite und (außerhalb des Editors) Höhe des Fensters
+function sizeGrid(g, L, cw, ch) {
+  const cell = Math.max(40, Math.min(130, cw, ch));
+  g.style.setProperty('--cell', cell + 'px');
+  g.style.setProperty('--rows', L.rows);
+  g.style.gridTemplateColumns = `repeat(${L.cols}, var(--cell))`;
+  g.style.width = cell * L.cols + GAP * (L.cols - 1) + 'px';
+  return cell;
+}
 function fit() {
   const L = cur(), g = $('grid');
   const cw = (g.parentElement.clientWidth - GAP * (L.cols - 1)) / L.cols;
   const top = g.getBoundingClientRect().top + scrollY;
   const ch = (innerHeight - top - $('pager').offsetHeight - 32 - GAP * (L.rows - 1)) / L.rows;
-  CELL = Math.max(40, Math.min(130, cw, editing ? Infinity : ch));
-  g.style.setProperty('--cell', CELL + 'px');
-  g.style.setProperty('--rows', L.rows);
-  g.style.gridTemplateColumns = `repeat(${L.cols}, var(--cell))`;
-  g.style.width = CELL * L.cols + GAP * (L.cols - 1) + 'px';
+  CELL = sizeGrid(g, L, cw, editing ? Infinity : ch);
+  fitPopup();
+}
+function fitPopup() {
+  const p = layout.popups && layout.popups[popStack[popStack.length - 1]];
+  if (!p || $('pop').hidden) return;
+  const cw = (Math.min(innerWidth - 56, 640) - GAP * (p.cols - 1)) / p.cols;
+  const ch = (innerHeight - 160 - GAP * (p.rows - 1)) / p.rows;
+  sizeGrid($('popgrid'), p, cw, ch);
 }
 addEventListener('resize', fit);
 
-function build() {
-  const L = cur(), g = $('grid');
-  g.innerHTML = ''; W = [];
-  g.classList.toggle('edit', editing);
-  document.body.classList.toggle('editing', editing);
+function fillGrid(g, L, list, edit) {
+  g.innerHTML = ''; list.length = 0;
   L.widgets.forEach((d, idx) => {
     const el = document.createElement('div');
-    el.className = 'w ' + d.type + (editing && idx === sel ? ' sel' : '');
+    el.className = 'w ' + d.type + (edit && idx === sel ? ' sel' : '');
     place(el, d);
-    const w = d.type === 'fader' ? faderWidget(d, el) : buttonWidget(d, el);
-    w.d = d; w.el = el; W.push(w);
-    if (editing) bindEdit(el, idx);
+    const w = d.type === 'fader' ? faderWidget(d, el) : d.type === 'popup' ? popupWidget(d, el) : buttonWidget(d, el);
+    w.d = d; w.el = el; list.push(w);
+    if (edit) bindEdit(el, idx);
     g.appendChild(el);
     refresh(w);
   });
-  renderTools();
 }
+
+function build() {
+  const g = $('grid');
+  g.classList.toggle('edit', editing);
+  document.body.classList.toggle('editing', editing);
+  fillGrid(g, cur(), W, editing);
+  renderTools();
+  if (!editing) renderPopup();
+}
+
+// ---------- Popups ----------
+function renderPopup() {
+  const pop = $('pop'), p = (layout.popups || {})[popStack[popStack.length - 1]];
+  if (!p) { popStack.length = 0; pop.hidden = true; PW.length = 0; $('popgrid').innerHTML = ''; return; }
+  pop.hidden = false;
+  $('poptitle').textContent = p.title;
+  fillGrid($('popgrid'), p, PW, false);
+  fitPopup();
+}
+function openPopup(id) {
+  if (editing || !(layout.popups || {})[id] || popStack[popStack.length - 1] === id || popStack.length >= 4) return;
+  popStack.push(id); renderPopup();
+}
+function closePopup() { popStack.pop(); renderPopup(); }
+$('popx').onclick = closePopup;
+$('pop').addEventListener('click', (e) => { if (e.target === $('pop')) closePopup(); });
+addEventListener('keydown', (e) => { if (e.key === 'Escape' && popStack.length) closePopup(); });
 
 // ---------- Overlay-Builder ----------
 const hit = (a, b) => a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
-const free = (d, idx) => d.x >= 0 && d.y >= 0 && d.x + d.w <= draft.cols && d.y + d.h <= draft.rows && !draft.widgets.some((o, j) => j !== idx && hit(d, o));
+const free = (d, idx) => {
+  const t = tgt();
+  return d.x >= 0 && d.y >= 0 && d.x + d.w <= t.cols && d.y + d.h <= t.rows && !t.widgets.some((o, j) => j !== idx && hit(d, o));
+};
 
 function bindEdit(el, idx) {
   el.addEventListener('pointerdown', (e) => {
@@ -257,9 +345,9 @@ function bindEdit(el, idx) {
     sel = idx;
     W.forEach((w, j) => w.el.classList.toggle('sel', j === idx));
     renderTools();
-    const d = draft.widgets[idx];
+    const d = tgt().widgets[idx];
     const r = $('grid').getBoundingClientRect();
-    const px = (r.width + GAP) / draft.cols, py = CELL + GAP;
+    const px = (r.width + GAP) / tgt().cols, py = CELL + GAP;
     const cell = (ev) => ({ cx: Math.floor((ev.clientX - r.left) / px), cy: Math.floor((ev.clientY - r.top) / py) });
     const s0 = cell(e), gx = s0.cx - d.x, gy = s0.cy - d.y;
     const mv = (ev) => {
@@ -273,59 +361,110 @@ function bindEdit(el, idx) {
   });
 }
 
+function newPopup() {
+  const n = Math.max(0, ...Object.keys(draft.popups).map((i) => +i.slice(1))) + 1;
+  draft.popups['p' + n] = { title: `Popup ${n}`, close: false, cols: 4, rows: 3, widgets: [] };
+  return 'p' + n;
+}
+function delPopup(id) {
+  const strip = (grid) => { grid.widgets = grid.widgets.filter((w) => !(w.type === 'popup' && w.popup === id)); };
+  strip(draft); Object.values(draft.popups).forEach(strip);
+  delete draft.popups[id]; editId = 'main'; sel = -1; build();
+}
+
 function add(type) {
+  const t = tgt();
   const h = type === 'fader' ? 3 : 1;
-  const used = new Set(draft.widgets.map((w) => w.key));
-  const key = [...Array(keys.length).keys()].find((k) => !used.has(k)) ?? 0;
+  const used = new Set(t.widgets.map((w) => w.key));
+  const key = type === 'popup' ? -1 : [...Array(keys.length).keys()].find((k) => !used.has(k)) ?? 0;
   const d = { type, key, x: 0, y: 0, w: 1, h };
   for (let y = 0; y + h <= 12; y++) {
-    for (let x = 0; x < draft.cols; x++) {
+    for (let x = 0; x < t.cols; x++) {
       d.x = x; d.y = y;
-      const rows = draft.rows;
-      if (y + h > draft.rows) draft.rows = y + h;
-      if (free(d, -1)) { draft.widgets.push(d); sel = draft.widgets.length - 1; return build(); }
-      draft.rows = rows;
+      const rows = t.rows;
+      if (y + h > t.rows) t.rows = y + h;
+      if (free(d, -1)) {
+        if (type === 'popup') { d.popup = newPopup(); d.label = ''; d.color = ''; } // neues, leeres Popup gleich mit anlegen
+        t.widgets.push(d); sel = t.widgets.length - 1; return build();
+      }
+      t.rows = rows;
     }
   }
 }
 
-function startEdit() { draft = JSON.parse(JSON.stringify(layout)); editing = true; sel = -1; build(); }
-function stopEdit() { editing = false; draft = null; sel = -1; build(); }
+function startEdit() {
+  draft = JSON.parse(JSON.stringify(layout)); draft.popups = draft.popups || {};
+  editing = true; editId = 'main'; sel = -1;
+  popStack.length = 0; $('pop').hidden = true;
+  build();
+}
+function stopEdit() { editing = false; draft = null; editId = 'main'; sel = -1; build(); }
 $('ed').onclick = startEdit;
 
 function renderTools() {
   const t = $('tools');
   if (!editing) { t.innerHTML = ''; fit(); return; }
-  const d = draft.widgets[sel];
-  const keyOpts = keys.map((_, k) => `<option value="${k}"${d && d.key === k ? ' selected' : ''}>Taste ${k} (${Math.floor(k / surfaceCols)}/${k % surfaceCols})</option>`).join('');
+  const g = tgt(), d = g.widgets[sel], pops = draft.popups, isPop = editId !== 'main';
+  const keyOpts = (d && d.type === 'popup' ? `<option value="-1"${d.key < 0 ? ' selected' : ''}>– keine (Beschriftung) –</option>` : '')
+    + keys.map((_, k) => `<option value="${k}"${d && d.key === k ? ' selected' : ''}>Taste ${k} (${Math.floor(k / surfaceCols)}/${k % surfaceCols})</option>`).join('');
+  const tgtOpts = '<option value="main">Hauptlayout</option>'
+    + Object.keys(pops).map((id) => `<option value="${id}"${id === editId ? ' selected' : ''}>Popup: ${esc(pops[id].title)}</option>`).join('');
+  const popOpts = d && d.type === 'popup' ? Object.keys(pops).map((id) => `<option value="${id}"${d.popup === id ? ' selected' : ''}>${esc(pops[id].title)}</option>`).join('') : '';
+  const typeOpts = [['button', 'Button'], ['fader', 'Fader'], ['popup', 'Popup-Button']].map(([v, n]) => `<option value="${v}"${d && d.type === v ? ' selected' : ''}>${n}</option>`).join('');
   t.innerHTML = `
     <div class="bar">
-      <button id="addb">+ Button</button><button id="addf">+ Fader</button>
-      <label>Spalten <input id="cols" type="number" min="1" max="12" value="${draft.cols}"></label>
-      <label>Zeilen <input id="rows" type="number" min="1" max="12" value="${draft.rows}"></label>
+      <label>Bearbeiten <select id="tgt">${tgtOpts}</select></label>${isPop ? `
+      <label>Titel <input id="ptitle" type="text" maxlength="24" value="${esc(g.title)}"></label>
+      <label><input id="pclose" type="checkbox"${g.close ? ' checked' : ''}> nach Tastendruck schließen</label>
+      <button id="pdel">Popup löschen</button>` : ''}
+    </div>
+    <div class="bar">
+      <button id="addb">+ Button</button><button id="addf">+ Fader</button><button id="addq">+ Popup-Button</button>
+      <label>Spalten <input id="cols" type="number" min="1" max="12" value="${g.cols}"></label>
+      <label>Zeilen <input id="rows" type="number" min="1" max="12" value="${g.rows}"></label>
       <button id="save" class="pri">Speichern</button><button id="cancel">Abbrechen</button>
     </div>
     <div class="bar">${d ? `
-      <label>Typ <select id="type"><option value="button"${d.type === 'button' ? ' selected' : ''}>Button</option><option value="fader"${d.type === 'fader' ? ' selected' : ''}>Fader</option></select></label>
-      <label>Taste <select id="key">${keyOpts}</select></label>
+      <label>Typ <select id="type">${typeOpts}</select></label>
+      <label>Taste <select id="key">${keyOpts}</select></label>${d.type === 'popup' ? `
+      <label>Ziel <select id="ptarget">${popOpts}</select></label>
+      <label>Name <input id="plabel" type="text" maxlength="24" value="${esc(d.label || '')}" placeholder="Popup-Titel"></label>
+      <label>Farbe <input id="pcolor" type="color" value="${d.color || '#394049'}"></label>` : ''}
       <label>B <input id="w" type="number" min="1" value="${d.w}"></label>
       <label>H <input id="h" type="number" min="1" value="${d.h}"></label>
       <button id="del">Löschen</button>` : 'Widget antippen zum Bearbeiten, ziehen zum Verschieben.'}
     </div>`;
+  $('tgt').onchange = (e) => { editId = e.target.value; sel = -1; build(); };
+  if (isPop) {
+    $('ptitle').onchange = (e) => { g.title = e.target.value.trim().slice(0, 24) || editId; build(); };
+    $('pclose').onchange = (e) => { g.close = e.target.checked; };
+    $('pdel').onclick = () => delPopup(editId);
+  }
   $('addb').onclick = () => add('button');
   $('addf').onclick = () => add('fader');
+  $('addq').onclick = () => add('popup');
   $('save').onclick = () => { socket.emit('layout:save', draft); layout = draft; stopEdit(); };
   $('cancel').onclick = stopEdit;
-  const fitAll = () => draft.widgets.forEach((w) => { w.w = Math.min(w.w, draft.cols); w.h = Math.min(w.h, draft.rows); w.x = Math.min(w.x, draft.cols - w.w); w.y = Math.min(w.y, draft.rows - w.h); });
-  $('cols').onchange = (e) => { draft.cols = Math.min(12, Math.max(1, +e.target.value || 1)); fitAll(); build(); };
-  $('rows').onchange = (e) => { draft.rows = Math.min(12, Math.max(1, +e.target.value || 1)); fitAll(); build(); };
+  const fitAll = () => g.widgets.forEach((w) => { w.w = Math.min(w.w, g.cols); w.h = Math.min(w.h, g.rows); w.x = Math.min(w.x, g.cols - w.w); w.y = Math.min(w.y, g.rows - w.h); });
+  $('cols').onchange = (e) => { g.cols = Math.min(12, Math.max(1, +e.target.value || 1)); fitAll(); build(); };
+  $('rows').onchange = (e) => { g.rows = Math.min(12, Math.max(1, +e.target.value || 1)); fitAll(); build(); };
   if (d) {
-    $('type').onchange = (e) => { d.type = e.target.value; build(); };
+    $('type').onchange = (e) => {
+      d.type = e.target.value;
+      if (d.type === 'popup') { d.popup = d.popup || Object.keys(pops)[0] || newPopup(); d.label = d.label || ''; d.color = d.color || ''; }
+      else { delete d.popup; delete d.label; delete d.color; if (d.key < 0) d.key = 0; }
+      build();
+    };
     $('key').onchange = (e) => { d.key = +e.target.value; build(); };
+    if (d.type === 'popup') {
+      $('ptarget').onchange = (e) => { d.popup = e.target.value; build(); };
+      $('plabel').onchange = (e) => { d.label = e.target.value.trim().slice(0, 24); build(); };
+      $('pcolor').onchange = (e) => { d.color = e.target.value; build(); };
+    }
     const size = (e, f) => { const prev = d[f]; d[f] = Math.max(1, +e.target.value || 1); if (!free(d, sel)) d[f] = prev; build(); };
     $('w').onchange = (e) => size(e, 'w');
     $('h').onchange = (e) => size(e, 'h');
-    $('del').onclick = () => { draft.widgets.splice(sel, 1); sel = -1; build(); };
+    $('del').onclick = () => { g.widgets.splice(sel, 1); sel = -1; build(); };
   }
   fit();
 }
@@ -334,15 +473,15 @@ function renderTools() {
 socket.on('init', ({ columns, layout: l, keys: ks, online, page }) => {
   net.page = page ?? null;
   surfaceCols = columns; layout = l; keys = ks;
-  editing = false; draft = null; sel = -1;
+  editing = false; draft = null; editId = 'main'; sel = -1; popStack.length = 0;
   build();
   setStatus(online);
 });
 socket.on('layout', ({ layout: l, keys: ks }) => {
-  layout = l; keys = ks;
+  layout = l; keys = ks; popStack.length = 0;
   if (editing) W.forEach(refresh); else build();
 });
-socket.on('key', ({ k, ...b }) => { keys[k] = b; W.forEach((w) => { if (w.d.key === k) refresh(w); }); });
+socket.on('key', ({ k, ...b }) => { keys[k] = b; [...W, ...PW].forEach((w) => { if (w.d.key === k) refresh(w); }); });
 function renderStatus() {
   const el = $('status');
   const err = net.lost ? 'Verbindung zum Panel-Server getrennt …'
