@@ -1,6 +1,7 @@
 const express = require('express');
 const http = require('http');
 const net = require('net');
+const fs = require('fs');
 const path = require('path');
 const { Server } = require('socket.io');
 const cfg = require('./config.json');
@@ -13,39 +14,40 @@ const srv = http.createServer(app);
 const io = new Server(srv);
 app.use(express.static(path.join(__dirname, 'public')));
 
-// ---- Zustand (kommt komplett von Companion, abhängig von der Seite des Surfaces) ----
-const keys = Array.from({ length: NB }, () => ({ text: '', color: null, textColor: null, bitmap: null }));
-const off = () => ({ label: '', min: 0, max: 100, step: 1, active: false });
-let meta = Array.from({ length: NF }, off);
-const values = Array(NF).fill(null);
+// ---- Zustand: Tasten kommen von Companion (abhängig von der Seite des Surfaces), das Layout aus layout.json ----
+const keys = Array.from({ length: TOTAL }, () => ({ text: '', color: null, textColor: null, bitmap: null }));
 let page = null;   // aktuelle Companion-Seite dieses Surfaces (aus LOCATION)
 let online = null; // null = verbinde, true = Surface registriert, false = nicht erreichbar
 
-const num = (x) => { const n = parseFloat(String(x).trim().replace(',', '.')); return Number.isNaN(n) ? null : n; };
-
-// Text des Encoder-Buttons: Label|min|max|step|wert   z. B.  Vox|-90|10|0.5|$(x32:ch01_level)
-function parseFader(text, i) {
-  const p = text.split('|').map((s) => s.trim());
-  if (p.length < 5) return null;
-  const min = num(p[1]), max = num(p[2]);
-  if (min === null || max === null || max <= min) return null;
-  let value = num(p[4]);
-  if (value === null && /∞|oo|inf/i.test(p[4])) value = min; // "-oo" = ganz unten
-  return { meta: { label: p[0] || `Fader ${i + 1}`, min, max, step: num(p[3]) || (max - min) / 100, active: true }, value };
+// Overlay-Layout: Widgets (Button/Fader) auf einem Raster, jedes an eine Satellite-Taste gebunden
+const LAYOUT_FILE = path.join(__dirname, 'layout.json');
+const int = (v, min, max, d) => (Number.isInteger(v) ? Math.min(max, Math.max(min, v)) : d);
+function cleanLayout(l) {
+  const cols = int(l.cols, 1, 12, 4), rows = int(l.rows, 1, 12, 4);
+  const widgets = (Array.isArray(l.widgets) ? l.widgets : []).slice(0, 64).map((w) => {
+    const x = int(w.x, 0, cols - 1, 0), y = int(w.y, 0, rows - 1, 0);
+    return { type: w.type === 'fader' ? 'fader' : 'button', key: int(w.key, 0, TOTAL - 1, 0), x, y, w: int(w.w, 1, cols - x, 1), h: int(w.h, 1, rows - y, 1) };
+  });
+  return { cols, rows, widgets };
 }
+function defaultLayout() {
+  const widgets = [];
+  for (let i = 0; i < NB; i++) widgets.push({ type: 'button', key: i, x: i % cfg.columns, y: Math.floor(i / cfg.columns), w: 1, h: 1 });
+  const fy = Math.ceil(NB / cfg.columns);
+  for (let i = 0; i < NF; i++) widgets.push({ type: 'fader', key: NB + i, x: i % cfg.columns, y: fy, w: 1, h: 3 });
+  return { cols: cfg.columns, rows: fy + 3, widgets };
+}
+let layout;
+try { layout = cleanLayout(JSON.parse(fs.readFileSync(LAYOUT_FILE, 'utf8'))); } catch (e) { layout = defaultLayout(); }
+
+// Bitmaps nur für Tasten senden, die als Button angezeigt werden (Fader lesen nur den Text)
+const needsBitmap = (k) => layout.widgets.some((w) => w.type === 'button' && w.key === k);
+const pub = (k) => (needsBitmap(k) ? keys[k] : { ...keys[k], bitmap: null });
+const pubKeys = () => keys.map((_, k) => pub(k));
 
 function applyKey(k, text, color, textColor, bitmap = null) {
-  if (k < NB) {
-    keys[k] = { text, color, textColor, bitmap };
-    io.emit('key', { i: k, ...keys[k] });
-    return;
-  }
-  const i = k - NB;
-  const parsed = parseFader(text, i);
-  const nextMeta = parsed ? parsed.meta : off();
-  const nextVal = parsed ? parsed.value : null;
-  if (JSON.stringify(nextMeta) !== JSON.stringify(meta[i])) { meta[i] = nextMeta; io.emit('meta', meta); }
-  if (nextVal !== values[i]) { values[i] = nextVal; io.emit('value', { i, value: nextVal }); }
+  keys[k] = { text, color, textColor, bitmap };
+  io.emit('key', { k, ...pub(k) });
 }
 
 // ---- Satellite-Verbindung zu Companion ----
@@ -120,33 +122,31 @@ function pageStep(dir) {
 
 // ---- Browser ----
 io.on('connection', (socket) => {
-  socket.emit('init', { columns: cfg.columns, keys, faders: meta, values, online, page });
+  socket.emit('init', { columns: cfg.columns, layout, keys: pubKeys(), online, page });
   const held = new Set(); // gedrückte Tasten dieses Browsers
   socket.on('pagestep', (d) => { if (d === 'UP' || d === 'DOWN') pageStep(d); });
 
-  const press = (key, action) => {
-    if (action === 'down') held.add(key); else held.delete(key);
-    send(`KEY-PRESS DEVICEID=${S.deviceId} KEY=${key} PRESSED=${action === 'down'}`);
-  };
-  socket.on('btn', ({ i, action }) => {
-    if (!Number.isInteger(i) || i < 0 || i >= NB || !['down', 'up'].includes(action)) return;
-    press(i, action);
+  const validKey = (k) => Number.isInteger(k) && k >= 0 && k < TOTAL;
+  socket.on('press', ({ k, action }) => {
+    if (!validKey(k) || !['down', 'up'].includes(action)) return;
+    if (action === 'down') held.add(k); else held.delete(k);
+    send(`KEY-PRESS DEVICEID=${S.deviceId} KEY=${k} PRESSED=${action === 'down'}`);
   });
-  socket.on('enc', ({ i, action }) => {
-    if (!Number.isInteger(i) || i < 0 || i >= NF || !['down', 'up'].includes(action)) return;
-    press(NB + i, action);
-  });
-  socket.on('rotate', ({ i, clicks }) => {
-    if (!Number.isInteger(i) || i < 0 || i >= NF || !Number.isInteger(clicks) || !clicks) return;
-    const key = NB + i;
+  socket.on('rotate', ({ k, clicks }) => {
+    if (!validKey(k) || !Number.isInteger(clicks) || !clicks) return;
     const dir = clicks > 0 ? 1 : -1;
     const multi = ['1', 'true'].includes(String(caps.ROTARY_AMOUNT)); // Companion >= 5.1: mehrere Rasten pro Nachricht
     let left = Math.min(Math.abs(clicks), 1000); // in Blöcken senden, damit bei großen Sprüngen keine Rasten verloren gehen
     while (left > 0) {
       const n = multi ? Math.min(left, 50) : 1;
-      send(`KEY-ROTATE DEVICEID=${S.deviceId} KEY=${key} DIRECTION=${dir * n}`);
+      send(`KEY-ROTATE DEVICEID=${S.deviceId} KEY=${k} DIRECTION=${dir * n}`);
       left -= n;
     }
+  });
+  socket.on('layout:save', (l) => {
+    layout = cleanLayout(l || {});
+    fs.writeFile(LAYOUT_FILE, JSON.stringify(layout, null, 2), (e) => e && console.error('layout.json:', e.message));
+    io.emit('layout', { layout, keys: pubKeys() });
   });
   socket.on('disconnect', () => { for (const k of held) send(`KEY-PRESS DEVICEID=${S.deviceId} KEY=${k} PRESSED=false`); held.clear(); });
 });

@@ -15,6 +15,19 @@ Es erscheint im Tab "Surfaces". Die aktuelle Seitennummer steht unten zwischen d
 - Installieren mit Offline-Shell (Service Worker) und Bildschirm-Wachhalten gehen nur über HTTPS oder `localhost`. Über `http://<ip>` funktionieren Vollbild und "Zum Home-Bildschirm" trotzdem, der Bildschirm kann aber ausgehen.
 - Reiner Kiosk-Rechner: `chromium --kiosk http://localhost:3000/?kiosk=1`.
 
+## Overlay-Builder
+Oben links auf ✎ tippen (nicht im Kiosk-Modus, also in einem normalen Browser ohne `?kiosk=1`). Dann:
+- "+ Button" / "+ Fader" fügt ein Widget an der ersten freien Stelle hinzu.
+- Widget antippen = auswählen, ziehen = verschieben (rastet am Raster ein, keine Überlappung).
+- Unten stellst du Typ, Companion-Taste (Nummer und Zeile/Spalte auf der Seite) und Größe (B x H) ein.
+- Spalten und Zeilen ändern die Rastergröße.
+- "Speichern" schreibt `layout.json` neben `server.js`. Alle verbundenen Browser, auch ein Kiosk-Panel, übernehmen das Layout sofort.
+  Ohne `layout.json` gilt das Standardlayout aus `config.json` (12 Buttons, 4 Fader). Datei löschen = zurücksetzen.
+
+Jedes Widget ist an eine der 16 Satellite-Tasten gebunden. Ein Button zeigt Bild, Text und Farbe dieser Taste,
+ein Fader liest ihren Text im Format `Label|min|max|step|wert` (siehe unten).
+Bitmaps schickt der Server nur für Tasten, die als Button angezeigt werden.
+
 ## Tasten
 Tasten 0 bis 11: Bild, Beschriftung und Farbe kommen aus Companion
 (`bitmapSize` in config.json, Standard 72).

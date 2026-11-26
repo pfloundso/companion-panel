@@ -1,9 +1,9 @@
 {
-  "satellite": { "host": "10.227.1.41", "port": 16622, "deviceId": "fader-panel", "productName": "Web Fader Panel" },
+  "satellite": { "host": "localhost", "port": 16622, "deviceId": "fader-panel", "productName": "Web Fader Panel" },
   "api": { "port": 16759, "surfaceId": "fader-panel" },
   "port": 3000,
   "columns": 4,
   "buttons": 12,
   "faders": 4,
-  "bitmapSize": 72
+  "bitmapSize": 256
 }
