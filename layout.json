@@ -1,15 +1,7 @@
 {
-  "cols": 4,
-  "rows": 9,
+  "cols": 9,
+  "rows": 5,
   "widgets": [
-    {
-      "type": "button",
-      "key": 0,
-      "x": 0,
-      "y": 0,
-      "w": 1,
-      "h": 1
-    },
     {
       "type": "button",
       "key": 1,
@@ -37,23 +29,15 @@
     {
       "type": "fader",
       "key": 0,
-      "x": 2,
-      "y": 1,
+      "x": 6,
+      "y": 0,
       "w": 1,
       "h": 3
     },
     {
-      "type": "button",
-      "key": 2,
-      "x": 1,
-      "y": 0,
-      "w": 2,
-      "h": 1
-    },
-    {
       "type": "popup",
       "key": 11,
-      "x": 3,
+      "x": 0,
       "y": 0,
       "w": 1,
       "h": 1,
@@ -69,7 +53,7 @@
       "widgets": [
         {
           "type": "button",
-          "key": 0,
+          "key": 8,
           "x": 0,
           "y": 0,
           "w": 1,
@@ -77,14 +61,14 @@
         },
         {
           "type": "button",
-          "key": 1,
+          "key": 9,
           "x": 1,
           "y": 0,
           "w": 1,
           "h": 1
         }
       ],
-      "title": "Popup 1",
+      "title": "Beamer",
       "close": false
     }
   }
